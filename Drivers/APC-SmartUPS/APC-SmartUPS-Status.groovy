@@ -34,13 +34,14 @@
 *  1.0.4.2   -- Guard parse() against late/stale Telnet callbacks so connectStatus cannot flip back to Connected after cleanup.
 *  1.0.4.3   -- Added dual-port UIO probe telemetry (p1 and p2 attributes), including robust NA invalidation and deterministic port-type presence signaling.
 *  1.0.4.4   -- Aligned probe temperature telemetry with tempUnits preference by using single per-port p1Temp/p2Temp attributes.
+*  1.0.4.5   -- Aligned probe schema with driver convention by adding per-port p1TempC/p1TempF and p2TempC/p2TempF alongside tempUnits-driven p1Temp/p2Temp.
 */
 
 import groovy.transform.Field
 import java.util.Collections
 
 @Field static final String DRIVER_NAME     = "APC SmartUPS Status"
-@Field static final String DRIVER_VERSION  = "1.0.4.4"
+@Field static final String DRIVER_VERSION  = "1.0.4.5"
 @Field static final String DRIVER_MODIFIED = "2026.02.24"
 @Field static final Map transientContext   = Collections.synchronizedMap([:])
 
@@ -73,11 +74,15 @@ metadata {
         attribute "p1HumAlm","string"
         attribute "p1Stat","string"
         attribute "p1Temp","number"
+        attribute "p1TempC","number"
+        attribute "p1TempF","number"
         attribute "p1Type","string"
         attribute "p2Hum","number"
         attribute "p2HumAlm","string"
         attribute "p2Stat","string"
         attribute "p2Temp","number"
+        attribute "p2TempC","number"
+        attribute "p2TempF","number"
         attribute "p2Type","string"
         attribute "firmwareVersion","string"
         attribute "inputFrequency","number"
@@ -686,6 +691,8 @@ private void invalidateProbePort(Integer port,String reason){
     emitChangedEvent("p${port}HumAlm","NA","External probe U${port} humidity alarm unavailable (${reason})")
     emitChangedEvent("p${port}Hum",-1,"External probe U${port} humidity invalidated (${reason})","%RH")
     emitChangedEvent("p${port}Temp",-999,"External probe U${port} temperature invalidated (${reason})",tempUnit)
+    emitChangedEvent("p${port}TempC",-999,"External probe U${port} temperatureC invalidated (${reason})","°C")
+    emitChangedEvent("p${port}TempF",-999,"External probe U${port} temperatureF invalidated (${reason})","°F")
 }
 
 private void handleUIOStatus(List<String> lines){
@@ -717,8 +724,12 @@ private void handleUIOStatus(List<String> lines){
             BigDecimal tempF=(unit=="F")?tempVal:(((tempVal*9G)/5G)+32G)
             BigDecimal tempC=(unit=="C")?tempVal:(((tempVal-32G)*5G)/9G)
             BigDecimal outTemp=((tempUnits?:"F")=="C")?tempC.setScale(1,java.math.RoundingMode.HALF_UP):tempF.setScale(1,java.math.RoundingMode.HALF_UP)
+            BigDecimal outTempC=tempC.setScale(1,java.math.RoundingMode.HALF_UP)
+            BigDecimal outTempF=tempF.setScale(1,java.math.RoundingMode.HALF_UP)
             String outUnit=((tempUnits?:"F")=="C")?"°C":"°F"
             emitChangedEvent("p${port}Temp",outTemp,"External probe U${port} temperature = ${outTemp}${outUnit}",outUnit)
+            emitChangedEvent("p${port}TempC",outTempC,"External probe U${port} temperatureC = ${outTempC}°C","°C")
+            emitChangedEvent("p${port}TempF",outTempF,"External probe U${port} temperatureF = ${outTempF}°F","°F")
         }
 
         def humidityMatch=(humidityToken =~ /^(-?\d+(?:\.\d+)?)%RH$/)
