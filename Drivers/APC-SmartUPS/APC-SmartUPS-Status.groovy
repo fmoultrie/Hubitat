@@ -811,8 +811,7 @@ private void clearTransient(String key=null){if(key){transientContext.remove("${
    =============================== */
 def parse(String msg){
     def cs=device.currentValue("connectStatus")
-    def hasActiveSession=(getTransient("sessionStart")!=null)||(state.pendingCmds!=null)
-    if(cs=="Disconnected"&&!hasActiveSession){
+    if(cs=="Disconnected"){
         logDebug "parse(): ignoring stale Telnet callback while disconnected"
         return
     }
