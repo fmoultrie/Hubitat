@@ -32,13 +32,14 @@
 *  1.0.4.0   -- Added NUL (0x00) stripping in parse() to ensure compatibility with AP9641 (NMC3) Telnet CR/NULL/LF line framing.
 *  1.0.4.1   -- Added telnetConnect options with CR termChars for reliable parse() callbacks on AP9641/NMC3 framing; fallback to legacy signature retained.
 *  1.0.4.2   -- Guard parse() against late/stale Telnet callbacks so connectStatus cannot flip back to Connected after cleanup.
+*  1.0.4.3   -- Added dual-port UIO probe telemetry for APC AP9335TH with p1/p2 attributes, deterministic presence signaling, strict NA invalidation, and tempUnits-aligned temperature schema (Temp, TempC, TempF).
 */
 
 import groovy.transform.Field
 import java.util.Collections
 
 @Field static final String DRIVER_NAME     = "APC SmartUPS Status"
-@Field static final String DRIVER_VERSION  = "1.0.4.2"
+@Field static final String DRIVER_VERSION  = "1.0.4.3"
 @Field static final String DRIVER_MODIFIED = "2026.02.24"
 @Field static final Map transientContext   = Collections.synchronizedMap([:])
 
@@ -67,6 +68,20 @@ metadata {
         attribute "connectStatus", "string"
         attribute "deviceName","string"
         attribute "driverInfo","string"
+        attribute "p1Hum","number"
+        attribute "p1HumAlm","string"
+        attribute "p1Stat","string"
+        attribute "p1Temp","number"
+        attribute "p1TempC","number"
+        attribute "p1TempF","number"
+        attribute "p1Type","string"
+        attribute "p2Hum","number"
+        attribute "p2HumAlm","string"
+        attribute "p2Stat","string"
+        attribute "p2Temp","number"
+        attribute "p2TempC","number"
+        attribute "p2TempF","number"
+        attribute "p2Type","string"
         attribute "firmwareVersion","string"
         attribute "inputFrequency","number"
         attribute "inputVoltage","number"
@@ -117,7 +132,7 @@ metadata {
         attribute "upsLocation","string"
         attribute "upsStatus","string"
         attribute "upsUptime","string"
-        attribute "wiringFault","string"
+        attribute "wiringFault","boolean"
 
         command "refresh"
         command "disableDebugLoggingNow"
@@ -430,14 +445,15 @@ def setOutletGroup(p0,p1,p2){
 
 def refresh() {
     checkExternalUPSControlChange()
+    def connectStatus=device.currentValue("connectStatus")
     if(connectStatus in ["Connected", "Trying"]){logInfo "refresh(): Telnet session already active, skipping this refresh request";return}
     logInfo "${driverInfoString()} refreshing..."
     state.remove("authStarted");logDebug "Building Reconnoiter command list"
-    def reconCmds=["ups ?","upsabout","about","alarmcount -p critical","alarmcount -p warning","alarmcount -p informational","detstatus -all"]
+    def reconCmds=["ups ?","upsabout","about","alarmcount -p critical","alarmcount -p warning","alarmcount -p informational","detstatus -all","uio -disc","uio -st 1","uio -st 2"]
     logDebug "Initiating Reconnoiter via sendUPSCommand()"
     sendUPSCommand("Reconnoiter", reconCmds)
 	def rt=String.format("%02d:%02d",device.currentValue('runTimeHours')as Integer,device.currentValue('runTimeMinutes')as Integer);def summaryText="${device.currentValue('upsStatus')} | ${rt} | ${device.currentValue('outputWattsPercent')}% | ${device.currentValue('temperature')}°"
-	emitEvent("summaryText",summaryText);if(!logEvent)log.info"[${DRIVER_NAME} ${summaryText}"
+	emitEvent("summaryText",summaryText);if(!logEvents)log.info"[${DRIVER_NAME} ${summaryText}"
 }
 
 /* ===============================
@@ -508,7 +524,7 @@ private handleBatteryData(def pair){
                     }else{logInfo"Battery run time recovered above ${threshold} minutes (${remMins} remaining)";state.remove("hubShutdownIssued")}
                 }
             }catch(e){logWarn"handleBatteryData(): low-battery evaluation error (${e.message})"};break
-        case"Next Battery":if(p1=="Replacement"&&p2=="Date:"){def nd=p3?normalizeDate(p3):"Unknown";emitChangedEvent("nextBatteryReplacement",nd,"UPS Next Battery Replacement Date = ${nd}")};break
+        case"Next Battery":if(p1=="Replacement"&&p2=="Date:"){def nd=p3?normalizeDateTime(p3):"Unknown";emitChangedEvent("nextBatteryReplacement",nd,"UPS Next Battery Replacement Date = ${nd}")};break
         default:if((p0 in["Internal","Battery"])&&p1=="Temperature:"){emitChangedEvent("temperatureC",p2,"UPS Temperature = ${p2}°${p3}","°C");emitChangedEvent("temperatureF",p4,"UPS Temperature = ${p4}°${p5}","°F");if(tempUnits=="F")emitChangedEvent("temperature",p4,"UPS Temperature = ${p4}°${p5} / ${p2}°${p3}","°F")else emitChangedEvent("temperature",p2,"UPS Temperature = ${p2}°${p3} / ${p4}°${p5}","°C")};break
     }
 }
@@ -655,6 +671,73 @@ private void handleNMCData(List<String> lines){
     clearTransient("aboutSection")
 }
 
+private void handleUIODiscovery(List<String> lines){
+    lines.each{l->
+        def m=(l =~ /^U(\d+):(\w+)$/)
+        if(!m.matches())return
+        Integer port=m[0][1].toInteger()
+        String probeType=(m[0][2]?:"").toLowerCase()
+        emitChangedEvent("p${port}Type",probeType,"External probe type on U${port} = ${probeType}")
+        if(probeType in ["0","na"])invalidateProbePort(port,"discovery reported no probe")
+    }
+}
+
+private void invalidateProbePort(Integer port,String reason){
+    String tempUnit=((tempUnits?:"F")=="C")?"°C":"°F"
+    emitChangedEvent("p${port}Type","0","External probe U${port} type cleared (${reason})")
+    emitChangedEvent("p${port}Stat","NA","External probe U${port} not available (${reason})")
+    emitChangedEvent("p${port}HumAlm","NA","External probe U${port} humidity alarm unavailable (${reason})")
+    emitChangedEvent("p${port}Hum",-1,"External probe U${port} humidity invalidated (${reason})","%RH")
+    emitChangedEvent("p${port}Temp",-999,"External probe U${port} temperature invalidated (${reason})",tempUnit)
+    emitChangedEvent("p${port}TempC",-999,"External probe U${port} temperatureC invalidated (${reason})","°C")
+    emitChangedEvent("p${port}TempF",-999,"External probe U${port} temperatureF invalidated (${reason})","°F")
+}
+
+private void handleUIOStatus(List<String> lines){
+    lines.each{l->
+        def mNa=(l =~ /^U(\d+):NA$/)
+        if(mNa.matches()){
+            Integer port=mNa[0][1].toInteger()
+            invalidateProbePort(port,"status reported no probe")
+            return
+        }
+        def m=(l =~ /^U(\d+):(.+)$/)
+        if(!m.matches())return
+        Integer port=m[0][1].toInteger()
+        def tokens=(m[0][2]?:"").split(":")*.trim()
+        if(tokens.isEmpty())return
+
+        String tempToken=tokens.size()>=1?(tokens[0]?:""):""
+        String probeStatus=tokens.size()>=2?(tokens[1]?:""):""
+        String humidityToken=tokens.size()>=3?(tokens[2]?:""):""
+        String humidityAlarm=tokens.size()>=4?(tokens[3]?:""):""
+
+        if(probeStatus)emitChangedEvent("p${port}Stat",probeStatus,"External probe U${port} status = ${probeStatus}")
+        if(humidityAlarm)emitChangedEvent("p${port}HumAlm",humidityAlarm,"External probe U${port} humidity alarm = ${humidityAlarm}")
+
+        def tempMatch=((tempToken?:"").toUpperCase() =~ /^(-?\d+(?:\.\d+)?)([FC])$/)
+        if(tempMatch.matches()){
+            BigDecimal tempVal=tempMatch[0][1] as BigDecimal
+            String unit=(tempMatch[0][2]?:"F").toUpperCase()
+            BigDecimal tempF=(unit=="F")?tempVal:(((tempVal*9G)/5G)+32G)
+            BigDecimal tempC=(unit=="C")?tempVal:(((tempVal-32G)*5G)/9G)
+            BigDecimal outTemp=((tempUnits?:"F")=="C")?tempC.setScale(1,java.math.RoundingMode.HALF_UP):tempF.setScale(1,java.math.RoundingMode.HALF_UP)
+            BigDecimal outTempC=tempC.setScale(1,java.math.RoundingMode.HALF_UP)
+            BigDecimal outTempF=tempF.setScale(1,java.math.RoundingMode.HALF_UP)
+            String outUnit=((tempUnits?:"F")=="C")?"°C":"°F"
+            emitChangedEvent("p${port}Temp",outTemp,"External probe U${port} temperature = ${outTemp}${outUnit}",outUnit)
+            emitChangedEvent("p${port}TempC",outTempC,"External probe U${port} temperatureC = ${outTempC}°C","°C")
+            emitChangedEvent("p${port}TempF",outTempF,"External probe U${port} temperatureF = ${outTempF}°F","°F")
+        }
+
+        def humidityMatch=(humidityToken =~ /^(-?\d+(?:\.\d+)?)%RH$/)
+        if(humidityMatch.matches()){
+            BigDecimal humidityVal=humidityMatch[0][1] as BigDecimal
+            emitChangedEvent("p${port}Hum",humidityVal,"External probe U${port} humidity = ${humidityVal}%RH","%RH")
+        }
+    }
+}
+
 private handleBannerSection(List<String> lines){lines.each{l->handleBannerData(l)}}
 private handleUPSAboutSection(List<String> lines){lines.each{l->handleIdentificationAndSelfTest(l.split(/\s+/))}}
 private handleDetStatus(List<String> lines){lines.each{l->def p=l.split(/\s+/);handleUPSStatus(p);handleLastTransfer(p);handleBatteryData(p);handleElectricalMetrics(p);handleIdentificationAndSelfTest(p);handleUPSCommands(p)};def cmd=(atomicState.lastCommand?:'').toLowerCase()}
@@ -673,12 +756,18 @@ private void processBufferedSession(){
     def secAlarmWarn=extractSection(lines,"apc>alarmcount -p warning","apc>")
     def secAlarmInfo=extractSection(lines,"apc>alarmcount -p informational","apc>")
     def secDetStatus=extractSection(lines,"apc>detstatus -all","apc>")
+    def secUioDisc=extractSection(lines,"apc>uio -disc","apc>")
+    def secUioStatus1=extractSection(lines,"apc>uio -st 1","apc>")
+    def secUioStatus2=extractSection(lines,"apc>uio -st 2","apc>")
     if(secBanner)handleBannerSection(secBanner)
     if(secUps)handleUPSSection(secUps)
     if(secUpsAbout)handleUPSAboutSection(secUpsAbout)
     if(secAbout)handleNMCData(secAbout)
     if(secAlarmCrit||secAlarmWarn||secAlarmInfo)handleAlarmCount(secAlarmCrit+secAlarmWarn+secAlarmInfo)
     if(secDetStatus)handleDetStatus(secDetStatus)
+    if(secUioDisc)handleUIODiscovery(secUioDisc)
+    if(secUioStatus1)handleUIOStatus(secUioStatus1)
+    if(secUioStatus2)handleUIOStatus(secUioStatus2)
     finalizeSession("processBufferedSession")
 }
 
