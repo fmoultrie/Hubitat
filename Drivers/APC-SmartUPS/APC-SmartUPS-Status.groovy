@@ -33,13 +33,14 @@
 *  1.0.4.1   -- Added telnetConnect options with CR termChars for reliable parse() callbacks on AP9641/NMC3 framing; fallback to legacy signature retained.
 *  1.0.4.2   -- Guard parse() against late/stale Telnet callbacks so connectStatus cannot flip back to Connected after cleanup.
 *  1.0.4.3   -- Added dual-port UIO probe telemetry (p1 and p2 attributes), including robust NA invalidation and deterministic port-type presence signaling.
+*  1.0.4.4   -- Aligned probe temperature telemetry with tempUnits preference by using single per-port p1Temp/p2Temp attributes.
 */
 
 import groovy.transform.Field
 import java.util.Collections
 
 @Field static final String DRIVER_NAME     = "APC SmartUPS Status"
-@Field static final String DRIVER_VERSION  = "1.0.4.3"
+@Field static final String DRIVER_VERSION  = "1.0.4.4"
 @Field static final String DRIVER_MODIFIED = "2026.02.24"
 @Field static final Map transientContext   = Collections.synchronizedMap([:])
 
@@ -71,14 +72,12 @@ metadata {
         attribute "p1Hum","number"
         attribute "p1HumAlm","string"
         attribute "p1Stat","string"
-        attribute "p1TempC","number"
-        attribute "p1TempF","number"
+        attribute "p1Temp","number"
         attribute "p1Type","string"
         attribute "p2Hum","number"
         attribute "p2HumAlm","string"
         attribute "p2Stat","string"
-        attribute "p2TempC","number"
-        attribute "p2TempF","number"
+        attribute "p2Temp","number"
         attribute "p2Type","string"
         attribute "firmwareVersion","string"
         attribute "inputFrequency","number"
@@ -681,12 +680,12 @@ private void handleUIODiscovery(List<String> lines){
 }
 
 private void invalidateProbePort(Integer port,String reason){
+    String tempUnit=((tempUnits?:"F")=="C")?"°C":"°F"
     emitChangedEvent("p${port}Type","0","External probe U${port} type cleared (${reason})")
     emitChangedEvent("p${port}Stat","NA","External probe U${port} not available (${reason})")
     emitChangedEvent("p${port}HumAlm","NA","External probe U${port} humidity alarm unavailable (${reason})")
     emitChangedEvent("p${port}Hum",-1,"External probe U${port} humidity invalidated (${reason})","%RH")
-    emitChangedEvent("p${port}TempF",-999,"External probe U${port} temperature invalidated (${reason})","°F")
-    emitChangedEvent("p${port}TempC",-999,"External probe U${port} temperature invalidated (${reason})","°C")
+    emitChangedEvent("p${port}Temp",-999,"External probe U${port} temperature invalidated (${reason})",tempUnit)
 }
 
 private void handleUIOStatus(List<String> lines){
@@ -717,8 +716,9 @@ private void handleUIOStatus(List<String> lines){
             String unit=(tempMatch[0][2]?:"F").toUpperCase()
             BigDecimal tempF=(unit=="F")?tempVal:(((tempVal*9G)/5G)+32G)
             BigDecimal tempC=(unit=="C")?tempVal:(((tempVal-32G)*5G)/9G)
-            emitChangedEvent("p${port}TempF",tempF.setScale(1,java.math.RoundingMode.HALF_UP),"External probe U${port} temperature = ${tempF.setScale(1,java.math.RoundingMode.HALF_UP)}°F","°F")
-            emitChangedEvent("p${port}TempC",tempC.setScale(1,java.math.RoundingMode.HALF_UP),"External probe U${port} temperature = ${tempC.setScale(1,java.math.RoundingMode.HALF_UP)}°C","°C")
+            BigDecimal outTemp=((tempUnits?:"F")=="C")?tempC.setScale(1,java.math.RoundingMode.HALF_UP):tempF.setScale(1,java.math.RoundingMode.HALF_UP)
+            String outUnit=((tempUnits?:"F")=="C")?"°C":"°F"
+            emitChangedEvent("p${port}Temp",outTemp,"External probe U${port} temperature = ${outTemp}${outUnit}",outUnit)
         }
 
         def humidityMatch=(humidityToken =~ /^(-?\d+(?:\.\d+)?)%RH$/)
